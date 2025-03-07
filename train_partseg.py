@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from datasets.shapenet_part import ShapeNetPart
@@ -57,7 +58,7 @@ def calculate_shape_IoU(pred_np, seg_np, label, class_choice, visual=False):
         shape_ious.append(np.mean(part_ious))
     return shape_ious
 
-def train(args, io):
+def train(args, io, tensorboard):
     train_dataset = ShapeNetPart(partition='trainval', num_points=args.num_points, class_choice=args.class_choice)
     if (len(train_dataset) < 100):
         drop_last = False
@@ -98,7 +99,6 @@ def train(args, io):
     best_test_iou = 0
     for epoch in range(args.epochs):
         with tqdm(total=len(train_loader)+len(test_loader)) as pbar:
-            metrics = {}
             ####################
             # Train
             ####################
@@ -159,8 +159,8 @@ def train(args, io):
                                                                                                     avg_per_class_acc,
                                                                                                     np.mean(train_ious))
             
-            metrics["Train/Mean IOU"] = np.mean(train_ious)
-            metrics["Train/Loss"] = train_loss*1.0/count
+            tensorboard.add_scalar("Train/Mean IOU", np.mean(train_ious).item(), epoch)
+            tensorboard.add_scalar("Train/Loss", train_loss*1.0/count, epoch)
             io.cprint(outstr)
 
             ####################
@@ -197,7 +197,7 @@ def train(args, io):
                 test_pred_seg.append(pred_np)
                 test_label_seg.append(label.reshape(-1))
                 pbar.update(1)
-
+                
             test_true_cls = np.concatenate(test_true_cls)
             test_pred_cls = np.concatenate(test_pred_cls)
             test_acc = metrics.accuracy_score(test_true_cls, test_pred_cls)
@@ -212,14 +212,13 @@ def train(args, io):
                                                                                                 avg_per_class_acc,
                                                                                                 np.mean(test_ious))
             
-            metrics["Test/Mean IOU"] = np.mean(test_ious)
-            metrics["Test/Loss"] = test_loss*1.0/count
+            tensorboard.add_scalar("Test/Mean IOU", np.mean(test_ious).item(), epoch)
+            tensorboard.add_scalar("Test/Loss", test_loss*1.0/count, epoch)
             io.cprint(outstr)
             if np.mean(test_ious) >= best_test_iou:
                 best_test_iou = np.mean(test_ious)
                 torch.save(model.state_dict(), 'outputs/%s/models/model.t7' % args.exp_name)
                 
-            print(wandb_log)
 
 
 def test(args, io):
@@ -339,6 +338,9 @@ if __name__ == "__main__":
     _init_()
 
     io = IOStream('outputs/' + args.exp_name + '/run.log')
+    tb_path= 'outputs/' + args.exp_name + '/logs'
+    os.makedirs(tb_path, exist_ok=True)
+    tensorboard = SummaryWriter(tb_path)
     io.cprint(str(args))
 
     args.cuda = not args.no_cuda and torch.cuda.is_available()
@@ -351,6 +353,6 @@ if __name__ == "__main__":
         io.cprint('Using CPU')
 
     if not args.eval:
-        train(args, io)
+        train(args, io, tensorboard)
     else:
         test(args, io)
