@@ -1,4 +1,7 @@
-models/__pycache__
-datasets/__pycache__
+.vscode/
+**.py[cod]
+
 /data
 /weights
+/results
+/temp**
