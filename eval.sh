@@ -11,3 +11,5 @@ echo "Evaluating model with state dict at $sd_path"
 
 echo "Fewshot classification"
 python eval_fewshot.py --model_path $sd_path --n_runs 50
+echo "Linear evaluation"
+python eval_linear.py --model_path $sd_path

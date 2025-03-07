@@ -5,3 +5,5 @@
 /weights
 /results
 /temp**
+/wandb
+/checkpoints
