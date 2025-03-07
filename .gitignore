@@ -1,2 +1,4 @@
 models/__pycache__
 datasets/__pycache__
+/data
+/weights

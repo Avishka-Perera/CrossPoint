@@ -38,7 +38,7 @@ device = torch.device("cuda")
 #Try to load models
 model = DGCNN(args).to(device)
 
-model.load_state_dict(torch.load(args.model_path))
+model.load_state_dict(torch.load(args.model_path, weights_only=True))
 model.inv_head = nn.Identity()
 print("Model Loaded !!")
 
