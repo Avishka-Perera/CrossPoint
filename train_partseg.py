@@ -8,12 +8,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
+from tqdm import tqdm
 
 from datasets.shapenet_part import ShapeNetPart
 from models.dgcnn import DGCNN_partseg
 from torch.utils.data import DataLoader
 from util import cal_loss, IOStream
-import wandb
 
 global class_cnts
 class_indexs = np.zeros((16,), dtype=int)
@@ -75,7 +75,7 @@ def train(args, io):
     model = DGCNN_partseg(args, seg_num_all, pretrain=False).to(device)    
         
     model_path = args.pretrained_path
-    net = torch.load(model_path)
+    net = torch.load(model_path, weights_only=True)
     model.load_state_dict(net, strict=False)
     
     print("Model Loaded!!!")
@@ -94,130 +94,132 @@ def train(args, io):
 
     criterion = cal_loss
     
-    wandb.init(project="CrossPoint", name=args.exp_name)
-    wandb.watch(model)
 
     best_test_iou = 0
     for epoch in range(args.epochs):
-        wandb_log = {}
-        ####################
-        # Train
-        ####################
-        train_loss = 0.0
-        count = 0.0
-        model.train()
-        train_true_cls = []
-        train_pred_cls = []
-        train_true_seg = []
-        train_pred_seg = []
-        train_label_seg = []
-        for data, label, seg in train_loader:
-            seg = seg - seg_start_index
-            label_one_hot = np.zeros((label.shape[0], 16))
-            for idx in range(label.shape[0]):
-                label_one_hot[idx, label[idx]] = 1
-            label_one_hot = torch.from_numpy(label_one_hot.astype(np.float32))
-            data, label_one_hot, seg = data.to(device), label_one_hot.to(device), seg.to(device)
-            data = data.permute(0, 2, 1)
-            batch_size = data.size()[0]
-            opt.zero_grad()
-            seg_pred = model(data, label_one_hot)
-            seg_pred = seg_pred.permute(0, 2, 1).contiguous()
-            loss = criterion(seg_pred.view(-1, seg_num_all), seg.view(-1,1).squeeze())
-            loss.backward()
-            opt.step()
-            pred = seg_pred.max(dim=2)[1]               # (batch_size, num_points)
-            count += batch_size
-            train_loss += loss.item() * batch_size
-            seg_np = seg.cpu().numpy()                  # (batch_size, num_points)
-            pred_np = pred.detach().cpu().numpy()       # (batch_size, num_points)
-            train_true_cls.append(seg_np.reshape(-1))       # (batch_size * num_points)
-            train_pred_cls.append(pred_np.reshape(-1))      # (batch_size * num_points)
-            train_true_seg.append(seg_np)
-            train_pred_seg.append(pred_np)
-            train_label_seg.append(label.reshape(-1))
-        if args.scheduler == 'cos':
-            scheduler.step()
-        elif args.scheduler == 'step':
-            if opt.param_groups[0]['lr'] > 1e-5:
-                scheduler.step()
-            if opt.param_groups[0]['lr'] < 1e-5:
-                for param_group in opt.param_groups:
-                    param_group['lr'] = 1e-5
-        train_true_cls = np.concatenate(train_true_cls)
-        train_pred_cls = np.concatenate(train_pred_cls)
-        train_acc = metrics.accuracy_score(train_true_cls, train_pred_cls)
-        avg_per_class_acc = metrics.balanced_accuracy_score(train_true_cls, train_pred_cls)
-        train_true_seg = np.concatenate(train_true_seg, axis=0)
-        train_pred_seg = np.concatenate(train_pred_seg, axis=0)
-        train_label_seg = np.concatenate(train_label_seg)
-        train_ious = calculate_shape_IoU(train_pred_seg, train_true_seg, train_label_seg, args.class_choice)
-        outstr = 'Train %d, loss: %.6f, train acc: %.6f, train avg acc: %.6f, train iou: %.6f' % (epoch, 
-                                                                                                  train_loss*1.0/count,
-                                                                                                  train_acc,
-                                                                                                  avg_per_class_acc,
-                                                                                                  np.mean(train_ious))
-        
-        wandb_log["Train Mean IOU"] = np.mean(train_ious)
-        wandb_log["Train Loss"] = train_loss*1.0/count
-        io.cprint(outstr)
+        with tqdm(total=len(train_loader)+len(test_loader)) as pbar:
+            metrics = {}
+            ####################
+            # Train
+            ####################
+            train_loss = 0.0
+            count = 0.0
+            model.train()
+            train_true_cls = []
+            train_pred_cls = []
+            train_true_seg = []
+            train_pred_seg = []
+            train_label_seg = []
+            for data, label, seg in train_loader:
+                seg = seg - seg_start_index
+                label_one_hot = np.zeros((label.shape[0], 16))
+                for idx in range(label.shape[0]):
+                    label_one_hot[idx, label[idx]] = 1
+                label_one_hot = torch.from_numpy(label_one_hot.astype(np.float32))
+                data, label_one_hot, seg = data.to(device), label_one_hot.to(device), seg.to(device)
+                data = data.permute(0, 2, 1)
+                batch_size = data.size()[0]
+                opt.zero_grad()
+                seg_pred = model(data, label_one_hot)
+                seg_pred = seg_pred.permute(0, 2, 1).contiguous()
+                loss = criterion(seg_pred.view(-1, seg_num_all), seg.view(-1,1).squeeze())
+                loss.backward()
+                opt.step()
+                pred = seg_pred.max(dim=2)[1]               # (batch_size, num_points)
+                count += batch_size
+                train_loss += loss.item() * batch_size
+                seg_np = seg.cpu().numpy()                  # (batch_size, num_points)
+                pred_np = pred.detach().cpu().numpy()       # (batch_size, num_points)
+                train_true_cls.append(seg_np.reshape(-1))       # (batch_size * num_points)
+                train_pred_cls.append(pred_np.reshape(-1))      # (batch_size * num_points)
+                train_true_seg.append(seg_np)
+                train_pred_seg.append(pred_np)
+                train_label_seg.append(label.reshape(-1))
+                pbar.update(1)
 
-        ####################
-        # Test
-        ####################
-        test_loss = 0.0
-        count = 0.0
-        model.eval()
-        test_true_cls = []
-        test_pred_cls = []
-        test_true_seg = []
-        test_pred_seg = []
-        test_label_seg = []
-        for data, label, seg in test_loader:
-            seg = seg - seg_start_index
-            label_one_hot = np.zeros((label.shape[0], 16))
-            for idx in range(label.shape[0]):
-                label_one_hot[idx, label[idx]] = 1
-            label_one_hot = torch.from_numpy(label_one_hot.astype(np.float32))
-            data, label_one_hot, seg = data.to(device), label_one_hot.to(device), seg.to(device)
-            data = data.permute(0, 2, 1)
-            batch_size = data.size()[0]
-            seg_pred = model(data, label_one_hot)
-            seg_pred = seg_pred.permute(0, 2, 1).contiguous()
-            loss = criterion(seg_pred.view(-1, seg_num_all), seg.view(-1,1).squeeze())
-            pred = seg_pred.max(dim=2)[1]
-            count += batch_size
-            test_loss += loss.item() * batch_size
-            seg_np = seg.cpu().numpy()
-            pred_np = pred.detach().cpu().numpy()
-            test_true_cls.append(seg_np.reshape(-1))
-            test_pred_cls.append(pred_np.reshape(-1))
-            test_true_seg.append(seg_np)
-            test_pred_seg.append(pred_np)
-            test_label_seg.append(label.reshape(-1))
-        test_true_cls = np.concatenate(test_true_cls)
-        test_pred_cls = np.concatenate(test_pred_cls)
-        test_acc = metrics.accuracy_score(test_true_cls, test_pred_cls)
-        avg_per_class_acc = metrics.balanced_accuracy_score(test_true_cls, test_pred_cls)
-        test_true_seg = np.concatenate(test_true_seg, axis=0)
-        test_pred_seg = np.concatenate(test_pred_seg, axis=0)
-        test_label_seg = np.concatenate(test_label_seg)
-        test_ious = calculate_shape_IoU(test_pred_seg, test_true_seg, test_label_seg, args.class_choice)
-        outstr = 'Test %d, loss: %.6f, test acc: %.6f, test avg acc: %.6f, test iou: %.6f' % (epoch,
-                                                                                              test_loss*1.0/count,
-                                                                                              test_acc,
-                                                                                              avg_per_class_acc,
-                                                                                              np.mean(test_ious))
-        
-        wandb_log["Test Mean IOU"] = np.mean(test_ious)
-        wandb_log["Test Loss"] = test_loss*1.0/count
-        io.cprint(outstr)
-        if np.mean(test_ious) >= best_test_iou:
-            best_test_iou = np.mean(test_ious)
-            torch.save(model.state_dict(), 'outputs/%s/models/model.t7' % args.exp_name)
+            if args.scheduler == 'cos':
+                scheduler.step()
+            elif args.scheduler == 'step':
+                if opt.param_groups[0]['lr'] > 1e-5:
+                    scheduler.step()
+                if opt.param_groups[0]['lr'] < 1e-5:
+                    for param_group in opt.param_groups:
+                        param_group['lr'] = 1e-5
+            train_true_cls = np.concatenate(train_true_cls)
+            train_pred_cls = np.concatenate(train_pred_cls)
+            train_acc = metrics.accuracy_score(train_true_cls, train_pred_cls)
+            avg_per_class_acc = metrics.balanced_accuracy_score(train_true_cls, train_pred_cls)
+            train_true_seg = np.concatenate(train_true_seg, axis=0)
+            train_pred_seg = np.concatenate(train_pred_seg, axis=0)
+            train_label_seg = np.concatenate(train_label_seg)
+            train_ious = calculate_shape_IoU(train_pred_seg, train_true_seg, train_label_seg, args.class_choice)
+            outstr = 'Train %d, loss: %.6f, train acc: %.6f, train avg acc: %.6f, train iou: %.6f' % (epoch, 
+                                                                                                    train_loss*1.0/count,
+                                                                                                    train_acc,
+                                                                                                    avg_per_class_acc,
+                                                                                                    np.mean(train_ious))
             
-        
-        wandb.log(wandb_log)
+            metrics["Train/Mean IOU"] = np.mean(train_ious)
+            metrics["Train/Loss"] = train_loss*1.0/count
+            io.cprint(outstr)
+
+            ####################
+            # Test
+            ####################
+            test_loss = 0.0
+            count = 0.0
+            model.eval()
+            test_true_cls = []
+            test_pred_cls = []
+            test_true_seg = []
+            test_pred_seg = []
+            test_label_seg = []
+            for data, label, seg in test_loader:
+                seg = seg - seg_start_index
+                label_one_hot = np.zeros((label.shape[0], 16))
+                for idx in range(label.shape[0]):
+                    label_one_hot[idx, label[idx]] = 1
+                label_one_hot = torch.from_numpy(label_one_hot.astype(np.float32))
+                data, label_one_hot, seg = data.to(device), label_one_hot.to(device), seg.to(device)
+                data = data.permute(0, 2, 1)
+                batch_size = data.size()[0]
+                seg_pred = model(data, label_one_hot)
+                seg_pred = seg_pred.permute(0, 2, 1).contiguous()
+                loss = criterion(seg_pred.view(-1, seg_num_all), seg.view(-1,1).squeeze())
+                pred = seg_pred.max(dim=2)[1]
+                count += batch_size
+                test_loss += loss.item() * batch_size
+                seg_np = seg.cpu().numpy()
+                pred_np = pred.detach().cpu().numpy()
+                test_true_cls.append(seg_np.reshape(-1))
+                test_pred_cls.append(pred_np.reshape(-1))
+                test_true_seg.append(seg_np)
+                test_pred_seg.append(pred_np)
+                test_label_seg.append(label.reshape(-1))
+                pbar.update(1)
+
+            test_true_cls = np.concatenate(test_true_cls)
+            test_pred_cls = np.concatenate(test_pred_cls)
+            test_acc = metrics.accuracy_score(test_true_cls, test_pred_cls)
+            avg_per_class_acc = metrics.balanced_accuracy_score(test_true_cls, test_pred_cls)
+            test_true_seg = np.concatenate(test_true_seg, axis=0)
+            test_pred_seg = np.concatenate(test_pred_seg, axis=0)
+            test_label_seg = np.concatenate(test_label_seg)
+            test_ious = calculate_shape_IoU(test_pred_seg, test_true_seg, test_label_seg, args.class_choice)
+            outstr = 'Test %d, loss: %.6f, test acc: %.6f, test avg acc: %.6f, test iou: %.6f' % (epoch,
+                                                                                                test_loss*1.0/count,
+                                                                                                test_acc,
+                                                                                                avg_per_class_acc,
+                                                                                                np.mean(test_ious))
+            
+            metrics["Test/Mean IOU"] = np.mean(test_ious)
+            metrics["Test/Loss"] = test_loss*1.0/count
+            io.cprint(outstr)
+            if np.mean(test_ious) >= best_test_iou:
+                best_test_iou = np.mean(test_ious)
+                torch.save(model.state_dict(), 'outputs/%s/models/model.t7' % args.exp_name)
+                
+            print(wandb_log)
 
 
 def test(args, io):
@@ -301,7 +303,7 @@ if __name__ == "__main__":
                         help='Size of batch)')
     parser.add_argument('--epochs', type=int, default=200, metavar='N',
                         help='number of episode to train ')
-    parser.add_argument('--use_sgd', type=bool, default=True,
+    parser.add_argument('--use_sgd', type=bool, default=False,
                         help='Use SGD')
     parser.add_argument('--lr', type=float, default=0.001, metavar='LR',
                         help='learning rate (default: 0.001, 0.1 if using sgd)')
